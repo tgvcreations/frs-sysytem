@@ -1,0 +1,14 @@
+{
+  "name": "vuppala-frs-attendance-system",
+  "version": "1.0.0",
+  "description": "Staff FRS & Attendance System",
+  "scripts": {
+    "install:all": "cd backend && npm install && cd ../frontend && npm install",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev"
+  },
+  "keywords": ["attendance", "facial-recognition", "geofencing", "staff-management"],
+  "author": "Staff FRS & Attendance System",
+  "license": "ISC"
+}
+

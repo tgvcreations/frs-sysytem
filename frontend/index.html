@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Staff FRS & Attendance System</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <!-- Fonts: Standard Enterprise Clean Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      /* Fallback style if opened directly as file:// */
+      .file-warning-box {
+        display: none;
+        font-family: 'Plus Jakarta Sans', sans-serif;
+        background: #0f172a;
+        color: #f8fafc;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      .file-card {
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 16px;
+        max-width: 520px;
+        width: 100%;
+        padding: 32px;
+        text-align: center;
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      }
+      .file-btn {
+        display: inline-block;
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+        color: #0f172a;
+        font-weight: 800;
+        font-size: 14px;
+        padding: 12px 24px;
+        border-radius: 12px;
+        text-decoration: none;
+        margin-top: 20px;
+        box-shadow: 0 10px 15px -3px rgba(245, 158, 11, 0.3);
+      }
+      .file-btn-secondary {
+        display: inline-block;
+        background: #334155;
+        color: #e2e8f0;
+        font-weight: 700;
+        font-size: 13px;
+        padding: 10px 20px;
+        border-radius: 12px;
+        text-decoration: none;
+        margin-top: 10px;
+        margin-left: 8px;
+      }
+    </style>
+    <script>
+      // If user opened this file directly via file:// protocol
+      if (window.location.protocol === 'file:') {
+        window.addEventListener('DOMContentLoaded', () => {
+          const rootEl = document.getElementById('root');
+          const warningEl = document.getElementById('file-protocol-warning');
+          if (rootEl) rootEl.style.display = 'none';
+          if (warningEl) warningEl.style.display = 'flex';
+        });
+      }
+    </script>
+  </head>
+  <body class="bg-slate-50 text-slate-900 font-sans antialiased">
+    <!-- Local file protocol guidance fallback -->
+    <div id="file-protocol-warning" class="file-warning-box">
+      <div class="file-card">
+        <div style="font-size: 32px; margin-bottom: 12px;">🏛️</div>
+        <h2 style="font-size: 16px; color: #0f172a; font-weight: 700; margin: 0 0 4px 0;">
+          Staff FRS & Attendance System
+        </h2>
+        <p style="font-size: 12px; color: #2563eb; font-weight: 600; margin: 0 0 12px 0;">
+          Educational Administration Portal
+        </p>
+        <p style="font-size: 12px; color: #64748b; line-height: 1.5; margin: 0 0 16px 0;">
+          Camera and GPS require an HTTP server. In VS Code, simply right-click <strong>index.html</strong> and select <strong>"Open with Live Server"</strong>.
+        </p>
+      </div>
+    </div>
+
+    <!-- React root container -->
+    <div id="root">
+      <!-- Clean Minimal Initial Loading Indicator -->
+      <div style="min-height: 100vh; background: #f8fafc; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; color: #334155;">
+        <div style="width: 36px; height: 36px; border: 3px solid #cbd5e1; border-top-color: #2563eb; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+        <p style="margin-top: 16px; font-size: 14px; font-weight: 600; color: #1e293b;">
+          Staff FRS & Attendance System
+        </p>
+        <p style="margin-top: 4px; font-size: 12px; color: #64748b;">
+          Loading application...
+        </p>
+      </div>
+    </div>
+
+    <style>
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

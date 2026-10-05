@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const biometricController_1 = require("../controllers/biometricController");
+const authMiddleware_1 = require("../middleware/authMiddleware");
+const router = (0, express_1.Router)();
+router.use(authMiddleware_1.authenticateToken);
+router.post('/enroll', (0, authMiddleware_1.requireRole)(['admin']), biometricController_1.enrollFace);
+router.get('/status/:staffId', biometricController_1.getEnrollmentStatus);
+router.delete('/:staffId', (0, authMiddleware_1.requireRole)(['admin']), biometricController_1.disableEnrollment);
+exports.default = router;

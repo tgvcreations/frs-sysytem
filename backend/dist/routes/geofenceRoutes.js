@@ -1,0 +1,14 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const geofenceController_1 = require("../controllers/geofenceController");
+const authMiddleware_1 = require("../middleware/authMiddleware");
+const router = (0, express_1.Router)();
+router.use(authMiddleware_1.authenticateToken);
+router.get('/', geofenceController_1.getAllCampuses);
+router.get('/:id', geofenceController_1.getCampusById);
+router.post('/test-coordinate', geofenceController_1.testCoordinate);
+router.post('/', (0, authMiddleware_1.requireRole)(['admin']), geofenceController_1.createCampus);
+router.put('/:id', (0, authMiddleware_1.requireRole)(['admin']), geofenceController_1.updateCampus);
+router.delete('/:id', (0, authMiddleware_1.requireRole)(['admin']), geofenceController_1.deleteCampus);
+exports.default = router;

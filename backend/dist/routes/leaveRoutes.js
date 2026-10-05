@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const leaveController_1 = require("../controllers/leaveController");
+const authMiddleware_1 = require("../middleware/authMiddleware");
+const router = (0, express_1.Router)();
+router.use(authMiddleware_1.authenticateToken);
+router.get('/', leaveController_1.getLeaves);
+router.post('/', leaveController_1.applyLeave);
+router.patch('/:id/status', (0, authMiddleware_1.requireRole)(['admin', 'principal']), leaveController_1.updateLeaveStatus);
+exports.default = router;

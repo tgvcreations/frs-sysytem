@@ -296,9 +296,9 @@ export async function seedInitialData(): Promise<void> {
     }
   }
 
-  // 4. Seed Recent Attendance Records (Past 10 days for rich analytics)
+  // 4. Seed Historical Attendance Records (Past 10 days, strictly excluding today so today starts with 0 attendances)
   const today = new Date();
-  for (let i = 0; i < 10; i++) {
+  for (let i = 1; i < 10; i++) {
     const d = new Date(today);
     d.setDate(d.getDate() - i);
     const dateStr = d.toISOString().split('T')[0];
@@ -320,12 +320,12 @@ export async function seedInitialData(): Promise<void> {
         status = 'Late';
         checkIn = '09:25:30';
         hours = 7.1;
-      } else if (rand === 2 && i > 0) {
+      } else if (rand === 2) {
         status = 'On Leave';
         checkIn = null;
         checkOut = null;
         hours = 0;
-      } else if (rand === 3 && i > 0) {
+      } else if (rand === 3) {
         status = 'Absent';
         checkIn = null;
         checkOut = null;
@@ -335,14 +335,6 @@ export async function seedInitialData(): Promise<void> {
         checkIn = '08:45:00';
         checkOut = '13:00:00';
         hours = 4.25;
-      }
-
-      if (i === 0) {
-        // For today, some are checked in and haven't checked out yet
-        if (rand > 4) {
-          checkOut = null;
-          hours = 4.5;
-        }
       }
 
       await query(

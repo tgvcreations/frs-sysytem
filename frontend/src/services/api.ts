@@ -138,8 +138,11 @@ export const api = {
   enrollFace: (data: any) => apiRequest('/biometrics/enroll', { method: 'POST', body: JSON.stringify(data) }),
   getEnrollmentStatus: (staffId: string) => apiRequest(`/biometrics/status/${staffId}`),
   disableEnrollment: (staffId: string) => apiRequest(`/biometrics/${staffId}`, { method: 'DELETE' }),
+  getAllBiometrics: () => apiRequest('/biometrics/all'),
 
   // Attendance
+  identifyFace: (data: { face_descriptor: number[] }) =>
+    apiRequest('/attendance/identify', { method: 'POST', body: JSON.stringify(data) }),
   verifyAttendance: (data: any) => apiRequest('/attendance/verify', { method: 'POST', body: JSON.stringify(data) }),
   startVerificationSession: (data: { staff_id?: string; preferred_challenge?: string } = {}) =>
     apiRequest('/attendance/verification/start', { method: 'POST', body: JSON.stringify(data) }),

@@ -6,6 +6,9 @@ import {
   requestCameraStream,
   extract128DFaceDescriptor,
   analyzeVideoFrame,
+  calculateEuclideanDistance,
+  calculateCosineSimilarity,
+  distanceToConfidence,
   FrameAnalysisResult,
 } from '../services/faceEngine';
 import { haversineMeters } from '../services/localBackend';
@@ -14,11 +17,15 @@ import {
   MapPin,
   CheckCircle2,
   AlertTriangle,
+  AlertCircle,
   RefreshCw,
   Scan,
   ShieldCheck,
   User,
   Sliders,
+  Sparkles,
+  Timer,
+  Navigation,
 } from 'lucide-react';
 
 type VerificationState =
@@ -42,6 +49,21 @@ export const AttendancePage: React.FC = () => {
   const [selectedStaffId, setSelectedStaffId] = useState<string>('');
   const [campuses, setCampuses] = useState<CampusGeofence[]>([]);
   const [selectedCampus, setSelectedCampus] = useState<CampusGeofence | null>(null);
+
+  // Biometric Templates for Automatic 1:N Identification
+  const [enrolledTemplates, setEnrolledTemplates] = useState<{
+    staff_id: string;
+    staff?: Staff;
+    face_descriptor: number[];
+    profile_photo?: string;
+  }[]>([]);
+
+  // Automatic Face Detection & Identification State
+  const [detectedStaff, setDetectedStaff] = useState<Staff | null>(null);
+  const [detectionConfidence, setDetectionConfidence] = useState<number>(0);
+  const [isUnrecognizedPerson, setIsUnrecognizedPerson] = useState<boolean>(false);
+  const [autoVerifyCountdown, setAutoVerifyCountdown] = useState<number | null>(null);
+  const [verificationCooldown, setVerificationCooldown] = useState<boolean>(false);
 
   // Camera & Stream State
   const [cameraActive, setCameraActive] = useState<boolean>(false);
@@ -107,16 +129,18 @@ export const AttendancePage: React.FC = () => {
     return frameAnalysis;
   }, [frameAnalysis, spoofTestMode]);
 
-  // GPS State
+  // GPS State (strict real-device GPS required; no fake center default)
   const [gpsLocation, setGpsLocation] = useState<{
     latitude: number;
     longitude: number;
     accuracy: number;
   }>({
-    latitude: 16.887333, // Default Center Campus Location
-    longitude: 78.443028,
-    accuracy: 12.0,
+    latitude: 0,
+    longitude: 0,
+    accuracy: 999,
   });
+  const [gpsLocked, setGpsLocked] = useState<boolean>(false);
+  const [gpsError, setGpsError] = useState<string | null>(null);
   const [isSimulatedGps, setIsSimulatedGps] = useState<boolean>(false);
   const [gpsStatusMessage, setGpsStatusMessage] = useState<string>('Acquiring high-accuracy satellite fix...');
 
@@ -135,38 +159,43 @@ export const AttendancePage: React.FC = () => {
     message: '',
   });
 
-  // Load initial staff and campus data
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const [staffData, campusData] = await Promise.all([
-          api.getStaffList({ employment_status: 'Active' }),
-          api.getCampuses(),
-        ]);
-        const loadedStaff = staffData.staff || [];
-        setStaffList(loadedStaff);
-        setCampuses(campusData.campuses || []);
+  // Load initial staff, campus, and biometric data
+  const loadData = React.useCallback(async () => {
+    try {
+      const [staffData, campusData, bioData] = await Promise.all([
+        api.getStaffList({ employment_status: 'Active' }),
+        api.getCampuses(),
+        api.getAllBiometrics().catch(() => ({ templates: [] })),
+      ]);
+      const loadedStaff = staffData.staff || [];
+      setStaffList(loadedStaff);
+      setCampuses(campusData.campuses || []);
+      setEnrolledTemplates(bioData?.templates || []);
 
-        if (campusData.campuses && campusData.campuses.length > 0) {
-          setSelectedCampus(campusData.campuses[0]);
-        }
-
-        // If logged-in user is staff, strictly select their own profile
-        if (user?.role === 'staff' && user.staff_id) {
-          setSelectedStaffId(user.staff_id);
-        } else if (loadedStaff.length > 0) {
-          setSelectedStaffId(loadedStaff[0].id);
-        } else {
-          setSelectedStaffId('');
-        }
-      } catch (err: any) {
-        console.error('Failed to load initial attendance data:', err);
+      if (campusData.campuses && campusData.campuses.length > 0) {
+        setSelectedCampus(campusData.campuses[0]);
       }
+
+      // If logged-in user is staff, strictly select their own profile
+      if (user?.role === 'staff' && user.staff_id) {
+        setSelectedStaffId(user.staff_id);
+      } else if (loadedStaff.length > 0) {
+        setSelectedStaffId((prev) => (prev && loadedStaff.some((s: Staff) => s.id === prev) ? prev : loadedStaff[0].id));
+      } else {
+        setSelectedStaffId('');
+      }
+    } catch (err: any) {
+      console.error('Failed to load initial attendance data:', err);
     }
-    loadData();
   }, [user]);
 
-  // Real GPS fix
+  useEffect(() => {
+    loadData();
+    window.addEventListener('focus', loadData);
+    return () => window.removeEventListener('focus', loadData);
+  }, [loadData]);
+
+  // Real GPS fix (strictly requires real satellite/network geolocation fix)
   const fetchRealGps = () => {
     if ('geolocation' in navigator) {
       setGpsStatusMessage('Requesting GPS fix from device sensors...');
@@ -178,19 +207,26 @@ export const AttendancePage: React.FC = () => {
             accuracy: Math.round(pos.coords.accuracy * 10) / 10,
           });
           setIsSimulatedGps(false);
+          setGpsLocked(true);
+          setGpsError(null);
           setGpsStatusMessage(`GPS locked (accuracy: ±${Math.round(pos.coords.accuracy)}m)`);
         },
         (err) => {
           console.warn('Real GPS denied or unavailable:', err.message);
-          setGpsStatusMessage('Device GPS unavailable. Using institutional campus coordinates.');
-          setGpsLocation({
-            latitude: 16.887333,
-            longitude: 78.443028,
-            accuracy: 12.0,
-          });
+          setGpsLocked(false);
+          setGpsError(
+            err.code === 1
+              ? 'GPS permission blocked. Please allow Location access in browser URL bar to verify campus presence.'
+              : 'Device GPS unavailable. Geofence verification requires your device location.'
+          );
+          setGpsStatusMessage('❌ Location required to verify campus presence.');
         },
-        { enableHighAccuracy: true, timeout: 6000 }
+        { enableHighAccuracy: true, timeout: 8000 }
       );
+    } else {
+      setGpsLocked(false);
+      setGpsError('Geolocation is not supported by your browser.');
+      setGpsStatusMessage('❌ Geolocation unsupported.');
     }
   };
 
@@ -252,7 +288,9 @@ export const AttendancePage: React.FC = () => {
     return () => stopCamera();
   }, []);
 
-  // Real-Time Video Frame Analysis Loop
+  // Real-Time Video Frame Analysis & 1:N Automatic Face Identification Loop
+  const lastMatchTickRef = useRef<number>(0);
+
   useEffect(() => {
     let isRunning = true;
 
@@ -262,6 +300,75 @@ export const AttendancePage: React.FC = () => {
           const analysis = await analyzeVideoFrame(videoRef.current);
           if (isRunning) {
             setFrameAnalysis(analysis);
+
+            const now = Date.now();
+            // Run 1:N identification every 250ms
+            if (now - lastMatchTickRef.current > 250) {
+              lastMatchTickRef.current = now;
+
+              if (analysis.faceCount === 1 && !analysis.isPhoneOrPhotoDetected) {
+                const liveDesc = extract128DFaceDescriptor(videoRef.current, analysis.boundingBox);
+
+                // Compare live descriptor against all enrolled staff templates
+                let bestMatch: any = null;
+                let minDistance = 999;
+                let maxCosSim = -1;
+
+                for (const t of enrolledTemplates) {
+                  if (!t.face_descriptor || !Array.isArray(t.face_descriptor)) continue;
+                  const dist = calculateEuclideanDistance(liveDesc, t.face_descriptor);
+                  const cosSim = calculateCosineSimilarity(liveDesc, t.face_descriptor);
+                  if (dist < minDistance) {
+                    minDistance = dist;
+                    bestMatch = t;
+                  }
+                  if (cosSim > maxCosSim) {
+                    maxCosSim = cosSim;
+                  }
+                }
+
+                // Check prioritized match against selected staff if enrolled
+                const selectedTemplate = enrolledTemplates.find(
+                  (t) => t.staff_id === selectedStaffId || t.staff?.id === selectedStaffId
+                );
+                let matchedTarget: any = null;
+                let matchDistance = minDistance;
+
+                // Robust recognition threshold:
+                // 1:N match if Euclidean distance <= 0.70 or Cosine similarity >= 0.74
+                if (bestMatch && (minDistance <= 0.70 || maxCosSim >= 0.74)) {
+                  matchedTarget = bestMatch;
+                  matchDistance = minDistance;
+                } else if (selectedTemplate && selectedTemplate.face_descriptor) {
+                  const selDist = calculateEuclideanDistance(liveDesc, selectedTemplate.face_descriptor);
+                  const selCos = calculateCosineSimilarity(liveDesc, selectedTemplate.face_descriptor);
+                  if (selDist <= 0.73 || selCos >= 0.72) {
+                    matchedTarget = selectedTemplate;
+                    matchDistance = selDist;
+                  }
+                }
+
+                if (matchedTarget) {
+                  const matchedStaff = matchedTarget.staff || staffList.find((s) => s.id === matchedTarget.staff_id);
+                  if (matchedStaff) {
+                    setDetectedStaff(matchedStaff);
+                    setDetectionConfidence(distanceToConfidence(matchDistance, 0.70));
+                    setIsUnrecognizedPerson(false);
+                    // Automatically update selection to the recognized person
+                    setSelectedStaffId(matchedStaff.id);
+                  }
+                } else if (enrolledTemplates.length > 0) {
+                  setDetectedStaff(null);
+                  setDetectionConfidence(0);
+                  setIsUnrecognizedPerson(true);
+                }
+              } else if (analysis.faceCount === 0) {
+                setDetectedStaff(null);
+                setDetectionConfidence(0);
+                setIsUnrecognizedPerson(false);
+                setAutoVerifyCountdown(null);
+              }
+            }
           }
         } catch (err) {
           console.warn('Frame analysis tick error:', err);
@@ -283,10 +390,10 @@ export const AttendancePage: React.FC = () => {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [cameraActive]);
+  }, [cameraActive, enrolledTemplates, staffList]);
 
-  // Active Staff object
-  const activeStaff = staffList.find((s) => s.id === selectedStaffId);
+  // Active Staff object (identified from camera 1:N face recognition or selected profile)
+  const activeStaff = detectedStaff || (selectedStaffId ? staffList.find((s) => s.id === selectedStaffId) : null) || null;
 
   // Assigned Campus & Real-Time Distance Calculation
   const assignedCampus =
@@ -294,7 +401,7 @@ export const AttendancePage: React.FC = () => {
     selectedCampus ||
     campuses[0];
 
-  const currentDistanceMeters = assignedCampus
+  const currentDistanceMeters = assignedCampus && (gpsLocked || isSimulatedGps)
     ? haversineMeters(
         gpsLocation.latitude,
         gpsLocation.longitude,
@@ -307,8 +414,14 @@ export const AttendancePage: React.FC = () => {
     ? (assignedCampus.radius_meters || 350) + (assignedCampus.tolerance_meters || 15)
     : 365;
 
-  const isInsideGeofence = currentDistanceMeters <= allowedPerimeterMeters;
-  const isGpsAccuracyValid = gpsLocation.accuracy <= (assignedCampus?.allowed_accuracy_meters || 50);
+  const isInsideGeofence =
+    (gpsLocked || isSimulatedGps) &&
+    Boolean(assignedCampus) &&
+    currentDistanceMeters <= allowedPerimeterMeters;
+
+  const isGpsAccuracyValid =
+    (gpsLocked || isSimulatedGps) &&
+    gpsLocation.accuracy <= (assignedCampus?.allowed_accuracy_meters || 50);
 
   // Reset verification
   const resetVerificationState = () => {
@@ -316,18 +429,46 @@ export const AttendancePage: React.FC = () => {
     setErrorMessage(null);
   };
 
-  // Direct 1-Click Verification Pipeline (No Blink Test)
+  // Direct Verification Pipeline (strictly requires face presence and verified location)
   const handleStartVerification = async (bypassCamera: boolean = false) => {
     if (staffList.length === 0) {
       setErrorMessage('No staff registered in the institutional registry. Please add staff members in the Staff Registry first.');
       return;
     }
-    if (!activeStaff) {
-      setErrorMessage('Please select an enrolled staff member to verify.');
+    const targetStaff = detectedStaff || activeStaff;
+    if (!targetStaff) {
+      setErrorMessage('No staff profile identified. Please position an enrolled staff member in front of the camera.');
       return;
     }
 
+    // STRICT CHECK: A real person MUST be in front of the camera
+    if (!bypassCamera) {
+      if (effectiveAnalysis.faceCount === 0) {
+        setErrorMessage('No person detected. Position your face inside the camera guide oval to verify attendance.');
+        return;
+      }
+
+      if (effectiveAnalysis.faceCount > 1) {
+        setErrorMessage(`${effectiveAnalysis.faceCount} persons detected. Only one person should be visible during attendance verification.`);
+        return;
+      }
+
+      if (effectiveAnalysis.isPhoneOrPhotoDetected) {
+        setErrorMessage(
+          `Presentation attack rejected: ${
+            effectiveAnalysis.spoofType === 'phone_screen' ? 'Digital phone screen' : 'Static photograph'
+          } detected. Please present a real live person in front of the camera.`
+        );
+        return;
+      }
+    }
+
     // STRICT GEOFENCE ENFORCEMENT: Staff MUST be physically located inside campus boundary!
+    if (!gpsLocked && !isSimulatedGps) {
+      setErrorMessage('GPS Location Required: Device location fix is required to verify campus presence.');
+      return;
+    }
+
     if (!isInsideGeofence) {
       setErrorMessage(
         `Geofence Violation: You are ${currentDistanceMeters}m away from ${assignedCampus?.name || 'campus'} (exceeds ${assignedCampus?.radius_meters || 350}m perimeter). Attendance can only be recorded when physically inside the authorized campus grounds.`
@@ -342,29 +483,13 @@ export const AttendancePage: React.FC = () => {
       return;
     }
 
-    if (!bypassCamera) {
-      if (effectiveAnalysis.isPhoneOrPhotoDetected) {
-        setErrorMessage(
-          `Presentation attack rejected: ${
-            effectiveAnalysis.spoofType === 'phone_screen' ? 'Digital phone screen' : 'Static photograph'
-          } detected. Please present a real live person in front of the camera.`
-        );
-        return;
-      }
-
-      if (effectiveAnalysis.faceCount > 1) {
-        setErrorMessage('Only one person should be visible during attendance verification.');
-        return;
-      }
-    }
-
     setErrorMessage(null);
     setVState('STARTING_SESSION');
 
     try {
       // 1. Initiate Verification Session
       const startRes = await api.startVerificationSession({
-        staff_id: activeStaff.id,
+        staff_id: targetStaff.id,
       });
 
       const token = startRes.session_token;
@@ -383,8 +508,7 @@ export const AttendancePage: React.FC = () => {
 
       // 3. 1:1 Biometric Face Descriptor Matching
       setVState('VERIFYING_IDENTITY');
-      const staffNumericSeed = parseInt(activeStaff.staff_id.replace(/\D/g, '')) || 1;
-      const descriptor = extract128DFaceDescriptor(videoRef.current, staffNumericSeed);
+      const descriptor = extract128DFaceDescriptor(videoRef.current, effectiveAnalysis.boundingBox);
 
       await api.verifyIdentity({
         session_token: token,
@@ -407,11 +531,14 @@ export const AttendancePage: React.FC = () => {
         latitude: gpsLocation.latitude,
         longitude: gpsLocation.longitude,
         accuracy: gpsLocation.accuracy,
-        staff_id: activeStaff.id,
+        staff_id: targetStaff.id,
       });
 
       // 6. Success!
       setVState('SUCCESS');
+      setVerificationCooldown(true);
+      setTimeout(() => setVerificationCooldown(false), 10000); // 10s cooldown
+
       setResultModal({
         isOpen: true,
         isSuccess: true,
@@ -436,16 +563,67 @@ export const AttendancePage: React.FC = () => {
     }
   };
 
+  // Automatic Verification Trigger when Recognized Staff appears in camera & inside campus
+  useEffect(() => {
+    let timerId: any = null;
+
+    const canAutoVerify =
+      detectedStaff &&
+      effectiveAnalysis.faceCount === 1 &&
+      effectiveAnalysis.isCentered &&
+      !effectiveAnalysis.isPhoneOrPhotoDetected &&
+      isInsideGeofence &&
+      isGpsAccuracyValid &&
+      vState === 'IDLE' &&
+      !verificationCooldown &&
+      !resultModal.isOpen;
+
+    if (canAutoVerify) {
+      if (autoVerifyCountdown === null) {
+        setAutoVerifyCountdown(1.5);
+      } else if (autoVerifyCountdown > 0) {
+        timerId = setTimeout(() => {
+          setAutoVerifyCountdown((prev) => (prev !== null && prev > 0.4 ? prev - 0.5 : 0));
+        }, 500);
+      } else if (autoVerifyCountdown <= 0) {
+        handleStartVerification(false);
+        setAutoVerifyCountdown(null);
+      }
+    } else {
+      if (autoVerifyCountdown !== null) {
+        setAutoVerifyCountdown(null);
+      }
+    }
+
+    return () => {
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [
+    detectedStaff,
+    effectiveAnalysis.faceCount,
+    effectiveAnalysis.isCentered,
+    effectiveAnalysis.isPhoneOrPhotoDetected,
+    isInsideGeofence,
+    isGpsAccuracyValid,
+    vState,
+    verificationCooldown,
+    resultModal.isOpen,
+    autoVerifyCountdown,
+  ]);
+
   // Simulated GPS options for quick sandbox testing
   const setSimulatedCoords = (mode: 'inside' | 'outside' | 'poor_accuracy') => {
     setIsSimulatedGps(true);
     if (mode === 'inside') {
+      const target = assignedCampus || selectedCampus || campuses[0];
       setGpsLocation({
-        latitude: 16.887333,
-        longitude: 78.443028,
+        latitude: target ? target.center_latitude : 16.887333,
+        longitude: target ? target.center_longitude : 78.443028,
         accuracy: 12.0,
       });
-      setGpsStatusMessage('Simulated Inside Campus (±12m, inside boundary)');
+      setGpsLocked(true);
+      setGpsError(null);
+      setGpsStatusMessage(`Simulated Inside Campus (${target?.name || 'Main Campus'})`);
     } else if (mode === 'outside') {
       setGpsLocation({
         latitude: 17.4800,
@@ -493,25 +671,49 @@ export const AttendancePage: React.FC = () => {
           </div>
 
           {/* GPS Coordinates & Geofence Perimeter */}
-          <div className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 shadow-sm flex flex-col justify-center">
-            <div className="flex items-center gap-1.5">
-              <MapPin className={`w-3.5 h-3.5 ${isInsideGeofence ? 'text-emerald-600' : 'text-rose-600'}`} />
-              <span className="text-slate-600 font-medium">Campus Geofence:</span>
-              <span
-                className={`font-semibold px-1.5 py-0.2 rounded text-[10px] ${
-                  isInsideGeofence
-                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                    : 'bg-rose-50 text-rose-700 border border-rose-200'
-                }`}
-              >
-                {isInsideGeofence
-                  ? `Inside (${currentDistanceMeters}m)`
-                  : `Outside Perimeter (${currentDistanceMeters}m away)`}
-              </span>
+          <div className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 shadow-sm flex items-center gap-3">
+            <div>
+              <div className="flex items-center gap-1.5">
+                <MapPin className={`w-3.5 h-3.5 ${isInsideGeofence ? 'text-emerald-600' : 'text-rose-600'}`} />
+                <span className="text-slate-600 font-medium">Campus Geofence:</span>
+                <span
+                  className={`font-semibold px-1.5 py-0.2 rounded text-[10px] ${
+                    isInsideGeofence
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : 'bg-rose-50 text-rose-700 border border-rose-200'
+                  }`}
+                >
+                  {isInsideGeofence
+                    ? `Inside (${currentDistanceMeters}m)`
+                    : `Outside Perimeter (${currentDistanceMeters}m away)`}
+                </span>
+              </div>
+              <p className="text-[11px] font-mono text-slate-500 mt-0.5">
+                {gpsLocation.latitude.toFixed(6)}, {gpsLocation.longitude.toFixed(6)} (±{gpsLocation.accuracy}m)
+                {isSimulatedGps && <span className="text-emerald-700 font-sans font-semibold ml-1">[Simulated Inside]</span>}
+              </p>
             </div>
-            <p className="text-[11px] font-mono text-slate-500 mt-0.5">
-              {gpsLocation.latitude.toFixed(6)}, {gpsLocation.longitude.toFixed(6)} (±{gpsLocation.accuracy}m)
-            </p>
+
+            {!isInsideGeofence ? (
+              <button
+                type="button"
+                onClick={() => setSimulatedCoords('inside')}
+                className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 rounded text-[11px] font-semibold transition-colors shrink-0 flex items-center gap-1 cursor-pointer"
+                title="Simulate device location inside campus grounds"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Simulate Inside</span>
+              </button>
+            ) : isSimulatedGps ? (
+              <button
+                type="button"
+                onClick={fetchRealGps}
+                className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-300 rounded text-[10px] transition-colors shrink-0 cursor-pointer"
+                title="Switch back to real device GPS"
+              >
+                Reset GPS
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
@@ -830,25 +1032,66 @@ export const AttendancePage: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Live Person Confirmed Confirmation Banner */}
-                  {!effectiveAnalysis.isPhoneOrPhotoDetected && isInsideGeofence && effectiveAnalysis.faceCount === 1 && (
-                    <div className="absolute top-12 left-3 right-3 z-10 p-2 rounded-md bg-emerald-950/90 border border-emerald-500/80 text-white shadow flex items-center justify-between">
-                      <div className="flex items-center gap-2 text-xs font-semibold text-emerald-200">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                        <span>Live Person Detected — Biometric Presence Confirmed</span>
+                  {/* Auto-Detected Staff Confirmation Banner */}
+                  {!effectiveAnalysis.isPhoneOrPhotoDetected && detectedStaff && (
+                    <div className="absolute top-12 left-3 right-3 z-10 p-2.5 rounded-lg bg-emerald-950/95 border-2 border-emerald-500 text-white shadow-xl flex items-center justify-between">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <img
+                          src={
+                            detectedStaff.profile_photo_url ||
+                            `https://ui-avatars.com/api/?name=${encodeURIComponent(detectedStaff.full_name)}&background=059669&color=fff`
+                          }
+                          alt={detectedStaff.full_name}
+                          className="w-9 h-9 rounded-full object-cover border border-emerald-400 shrink-0 shadow-sm"
+                        />
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-xs text-emerald-100 truncate">
+                              {detectedStaff.full_name}
+                            </span>
+                            <span className="px-1.5 py-0.2 rounded bg-emerald-800 text-[10px] font-mono font-bold text-emerald-200">
+                              {detectedStaff.staff_id}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-emerald-300 flex items-center gap-1 mt-0.5">
+                            <Sparkles className="w-3 h-3 text-emerald-400" />
+                            <span>Auto-Detected ({detectionConfidence}% Match)</span>
+                            <span className="text-emerald-500">•</span>
+                            <span className={isInsideGeofence ? 'text-emerald-300' : 'text-rose-300 font-semibold'}>
+                              {isInsideGeofence ? 'Campus Verified' : 'Outside Campus'}
+                            </span>
+                          </p>
+                        </div>
                       </div>
-                      <span className="text-[10px] font-mono text-emerald-300">Ready for Verification</span>
+
+                      {autoVerifyCountdown !== null && isInsideGeofence && (
+                        <div className="flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 text-white text-[11px] font-bold shrink-0 animate-pulse border border-emerald-400">
+                          <Timer className="w-3.5 h-3.5" />
+                          <span>Hold: {autoVerifyCountdown.toFixed(1)}s</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Unregistered Face Warning Banner */}
+                  {!effectiveAnalysis.isPhoneOrPhotoDetected && effectiveAnalysis.faceCount === 1 && isUnrecognizedPerson && (
+                    <div className="absolute top-12 left-3 right-3 z-10 p-2.5 rounded-lg bg-amber-950/95 border border-amber-500 text-amber-100 shadow flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-xs font-semibold">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span>Face Detected (Not Enrolled) — Please register first in Face Enrollment.</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-amber-300">Unregistered</span>
                     </div>
                   )}
 
                   {/* Multiple Faces Warning */}
                   {effectiveAnalysis.faceCount > 1 && (
                     <div className="absolute inset-x-4 top-12 p-2 rounded bg-red-700 text-white text-center text-xs font-semibold shadow">
-                      Only one person must be visible in front of the camera.
+                      {effectiveAnalysis.faceCount} persons detected. Only one person must be visible in front of the camera.
                     </div>
                   )}
 
-                  {/* Clean Bottom Status Bar (No Blink Banner) */}
+                  {/* Clean Bottom Status Bar */}
                   <div className="absolute bottom-2.5 inset-x-2.5 pointer-events-auto">
                     <div className="p-2 rounded bg-slate-900/80 flex items-center justify-between text-[11px] text-slate-300 px-3">
                       <div className="flex items-center gap-1.5 truncate">
@@ -856,17 +1099,23 @@ export const AttendancePage: React.FC = () => {
                           className={`w-3.5 h-3.5 shrink-0 ${
                             effectiveAnalysis.isPhoneOrPhotoDetected
                               ? 'text-rose-400'
-                              : effectiveAnalysis.faceCount === 1
+                              : detectedStaff
                               ? 'text-emerald-400'
+                              : effectiveAnalysis.faceCount === 1
+                              ? 'text-blue-400'
                               : 'text-slate-400'
                           }`}
                         />
                         <span className="truncate">
                           {effectiveAnalysis.isPhoneOrPhotoDetected
                             ? effectiveAnalysis.statusMessage
+                            : detectedStaff
+                            ? `Recognized ${detectedStaff.full_name} (${detectedStaff.staff_id})`
+                            : isUnrecognizedPerson
+                            ? 'Face detected but not enrolled in registry'
                             : effectiveAnalysis.faceCount === 1
-                            ? effectiveAnalysis.statusMessage
-                            : 'Position your face within the guide box'}
+                            ? 'Face positioned. Verifying identity...'
+                            : 'Position your face within the guide oval'}
                         </span>
                       </div>
                       <span className="font-mono text-[10px] text-slate-400 shrink-0 ml-2">
@@ -886,7 +1135,7 @@ export const AttendancePage: React.FC = () => {
                 <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
                 <div className="flex-1">
                   <p className="font-semibold">{errorMessage}</p>
-                  <p className="text-[11px] text-red-600 mt-0.5">Please adjust your position and try again.</p>
+                  <p className="text-[11px] text-red-600 mt-0.5">Please adjust position and ensure you are on campus grounds.</p>
                 </div>
                 <button
                   onClick={resetVerificationState}
@@ -903,14 +1152,22 @@ export const AttendancePage: React.FC = () => {
                   onClick={() => handleStartVerification(false)}
                   disabled={
                     staffList.length === 0 ||
+                    effectiveAnalysis.faceCount !== 1 ||
                     effectiveAnalysis.isPhoneOrPhotoDetected ||
-                    !isInsideGeofence
+                    !isInsideGeofence ||
+                    !detectedStaff
                   }
                   className={`flex-1 py-2.5 px-4 rounded-lg font-semibold text-xs sm:text-sm shadow-sm flex items-center justify-center gap-2 transition-colors ${
                     staffList.length === 0
                       ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                      : effectiveAnalysis.faceCount === 0
+                      ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                      : effectiveAnalysis.faceCount > 1
+                      ? 'bg-red-700 text-white cursor-not-allowed opacity-90'
                       : effectiveAnalysis.isPhoneOrPhotoDetected
                       ? 'bg-red-700 text-white cursor-not-allowed opacity-90'
+                      : isUnrecognizedPerson
+                      ? 'bg-amber-100 text-amber-800 border border-amber-300 cursor-not-allowed'
                       : !isInsideGeofence
                       ? 'bg-rose-800 text-white cursor-not-allowed opacity-90'
                       : 'bg-blue-700 hover:bg-blue-800 text-white disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed cursor-pointer'
@@ -921,40 +1178,50 @@ export const AttendancePage: React.FC = () => {
                       <AlertTriangle className="w-4 h-4 text-slate-400" />
                       <span>No Staff in Registry (Add Staff First)</span>
                     </>
+                  ) : effectiveAnalysis.faceCount === 0 ? (
+                    <>
+                      <User className="w-4 h-4 text-slate-400" />
+                      <span>Position Face in Camera (Awaiting Person)</span>
+                    </>
+                  ) : effectiveAnalysis.faceCount > 1 ? (
+                    <>
+                      <AlertTriangle className="w-4 h-4 text-white" />
+                      <span>{effectiveAnalysis.faceCount} Persons Detected (Single Person Only)</span>
+                    </>
                   ) : effectiveAnalysis.isPhoneOrPhotoDetected ? (
                     <>
                       <AlertTriangle className="w-4 h-4 text-white" />
                       <span>Spoof Rejected ({effectiveAnalysis.spoofType === 'phone_screen' ? 'Phone' : 'Photo'})</span>
                     </>
+                  ) : isUnrecognizedPerson ? (
+                    <>
+                      <AlertCircle className="w-4 h-4 text-amber-700" />
+                      <span>Unregistered Person (Enroll in Face Enrollment)</span>
+                    </>
                   ) : !isInsideGeofence ? (
                     <>
                       <MapPin className="w-4 h-4 text-white" />
-                      <span>Outside Campus Perimeter ({currentDistanceMeters}m away — Blocked)</span>
+                      <span>
+                        {!gpsLocked && !isSimulatedGps
+                          ? 'GPS Location Fix Required'
+                          : `Outside Campus (${currentDistanceMeters}m away — Blocked)`}
+                      </span>
+                    </>
+                  ) : detectedStaff ? (
+                    <>
+                      <Sparkles className="w-4 h-4 text-emerald-300" />
+                      <span>
+                        {autoVerifyCountdown !== null
+                          ? `Auto-Verifying for ${detectedStaff.full_name} (${autoVerifyCountdown.toFixed(1)}s)`
+                          : `Verify & Mark for ${detectedStaff.full_name}`}
+                      </span>
                     </>
                   ) : (
                     <>
-                      <Scan className="w-4 h-4" />
-                      <span>Verify & Mark Attendance</span>
+                      <Scan className="w-4 h-4 text-slate-400" />
+                      <span>Position Face in Camera (Auto-Detect Active)</span>
                     </>
                   )}
-                </button>
-
-                <button
-                  onClick={() => handleStartVerification(true)}
-                  disabled={staffList.length === 0 || !isInsideGeofence}
-                  title={
-                    !isInsideGeofence
-                      ? `Blocked: You are ${currentDistanceMeters}m away from campus.`
-                      : 'Verify attendance directly (bypasses camera constraints for testing / low light)'
-                  }
-                  className={`px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shrink-0 ${
-                    !isInsideGeofence || staffList.length === 0
-                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
-                      : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300'
-                  }`}
-                >
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>Instant Verify (Test)</span>
                 </button>
               </div>
             ) : (
@@ -972,95 +1239,121 @@ export const AttendancePage: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Column: Staff Verification Context & GPS Sandbox (5 Cols) */}
+        {/* Right Column: Automated Staff Identification & Campus Geofence Telemetry (5 Cols) */}
         <div className="lg:col-span-5 space-y-4">
-          {/* Selected Staff Profile Card */}
+          {/* Automated Recognition Status Card */}
           <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm space-y-3">
             <div className="flex items-center justify-between border-b border-slate-200 pb-2">
               <span className="text-xs font-semibold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
                 <User className="w-4 h-4 text-blue-700" />
-                <span>Staff Member Profile</span>
+                <span>Automated Recognition Status</span>
               </span>
-              {user?.role === 'staff' && (
-                <span className="text-[10px] px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium border border-blue-200">
-                  Staff Self-Service
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 font-semibold border border-emerald-200">
+                  1:N Auto-Detect Active ({enrolledTemplates.length} Profiles)
                 </span>
-              )}
+                <button
+                  type="button"
+                  onClick={loadData}
+                  className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 transition-colors cursor-pointer"
+                  title="Reload biometric templates from registry"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                </button>
+              </div>
             </div>
 
-            {staffList.length === 0 ? (
-              <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs flex items-start gap-2.5">
-                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+            {effectiveAnalysis.faceCount === 0 ? (
+              <div className="p-5 bg-slate-50 border border-slate-200 rounded-lg text-center space-y-2.5">
+                <div className="w-12 h-12 mx-auto rounded-full bg-blue-50 border border-blue-200 flex items-center justify-center text-blue-600">
+                  <User className="w-6 h-6 animate-pulse" />
+                </div>
                 <div>
-                  <p className="font-semibold">No Staff Registered (0 in Registry)</p>
-                  <p className="text-[11px] text-amber-700 mt-0.5">
-                    There are currently 0 staff members in the institutional registry. Please go to the Staff Registry page to add personnel before verifying attendance.
+                  <h3 className="font-semibold text-slate-900 text-xs">Awaiting Staff Member</h3>
+                  <p className="text-[11px] text-slate-500 max-w-xs mx-auto mt-1">
+                    Please step in front of the camera. The system will automatically detect your face, verify campus location, and record attendance.
+                  </p>
+                </div>
+                <div className="pt-2 flex items-center justify-center gap-2 text-[10px] text-slate-400 font-mono">
+                  <span>Enrolled Profiles: {enrolledTemplates.length}</span>
+                  <span>•</span>
+                  <span>Touchless Kiosk</span>
+                </div>
+              </div>
+            ) : effectiveAnalysis.faceCount > 1 ? (
+              <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-800 text-xs flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 shrink-0 text-red-600 mt-0.5" />
+                <div>
+                  <p className="font-bold text-xs text-red-900">{effectiveAnalysis.faceCount} Persons Detected</p>
+                  <p className="text-[11px] text-red-700 mt-1">
+                    Multiple individuals are visible in the camera frame. For secure verification, only one person should stand in front of the camera.
                   </p>
                 </div>
               </div>
-            ) : (
-              <>
-                {/* Staff Selector (for Admin/Managers in terminal kiosk mode) */}
-                {user?.role !== 'staff' && (
-                  <div>
-                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                      Select Staff Member to Verify:
-                    </label>
-                    <select
-                      value={selectedStaffId}
-                      onChange={(e) => {
-                        setSelectedStaffId(e.target.value);
-                        resetVerificationState();
-                      }}
-                      className="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-600"
-                    >
-                      {staffList.map((st) => (
-                        <option key={st.id} value={st.id}>
-                          {st.staff_id} - {st.full_name} ({st.department})
-                        </option>
-                      ))}
-                    </select>
+            ) : isUnrecognizedPerson ? (
+              <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 shrink-0 text-amber-600 mt-0.5" />
+                <div>
+                  <p className="font-bold text-xs text-amber-900">Unrecognized Face</p>
+                  <p className="text-[11px] text-amber-700 mt-1">
+                    Face detected in camera, but no matching biometric profile was found in the staff registry. Please enroll in the Biometric Administration tab first.
+                  </p>
+                </div>
+              </div>
+            ) : detectedStaff ? (
+              <div className="space-y-3">
+                <div className="p-3.5 bg-emerald-50/70 rounded-lg border border-emerald-300 flex items-center gap-3">
+                  <img
+                    src={
+                      detectedStaff.profile_photo_url ||
+                      `https://ui-avatars.com/api/?name=${encodeURIComponent(detectedStaff.full_name)}`
+                    }
+                    alt={detectedStaff.full_name}
+                    className="w-14 h-14 rounded-lg object-cover border-2 border-emerald-400 shadow-sm shrink-0"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-xs font-bold text-slate-900 truncate">
+                        {detectedStaff.full_name}
+                      </p>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 font-mono font-semibold border border-emerald-300">
+                        {detectedStaff.staff_id}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 truncate mt-0.5">
+                      {detectedStaff.designation}
+                    </p>
+                    <p className="text-[10px] text-slate-500 truncate">
+                      {detectedStaff.department}
+                    </p>
+                    <div className="mt-1.5 flex items-center gap-2 text-[10px]">
+                      <span className="text-emerald-700 font-semibold flex items-center gap-1 bg-white px-2 py-0.5 rounded border border-emerald-200 shadow-2xs">
+                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                        Recognized ({detectionConfidence}% Match)
+                      </span>
+                      <span className="text-slate-500">{detectedStaff.shift_name || 'Primary Shift'}</span>
+                    </div>
                   </div>
-                )}
+                </div>
 
-                {/* Staff Details Card */}
-                {activeStaff && (
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex items-center gap-3">
-                    <img
-                      src={
-                        activeStaff.profile_photo_url ||
-                        `https://ui-avatars.com/api/?name=${encodeURIComponent(activeStaff.full_name)}`
-                      }
-                      alt={activeStaff.full_name}
-                      className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
-                        <p className="text-xs font-bold text-slate-900 truncate">
-                          {activeStaff.full_name}
-                        </p>
-                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-200 text-slate-700 font-mono font-medium">
-                          {activeStaff.staff_id}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-600 truncate">
-                        {activeStaff.designation}
+                {autoVerifyCountdown !== null && (
+                  <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-xs flex items-center gap-2.5 animate-pulse">
+                    <RefreshCw className="w-4 h-4 text-blue-600 animate-spin shrink-0" />
+                    <div>
+                      <p className="font-semibold text-xs">
+                        Auto-verifying attendance in {autoVerifyCountdown.toFixed(1)}s...
                       </p>
-                      <p className="text-[10px] text-slate-500 truncate mt-0.5">
-                        {activeStaff.department}
-                      </p>
-                      <div className="mt-1 flex items-center gap-2 text-[10px]">
-                        <span className="text-emerald-700 font-medium flex items-center gap-1">
-                          <ShieldCheck className="w-3 h-3 text-emerald-600" />
-                          {activeStaff.face_enrollment_status}
-                        </span>
-                        <span className="text-slate-300">•</span>
-                        <span className="text-slate-500">{activeStaff.shift_name || 'Primary Shift'}</span>
-                      </div>
+                      <p className="text-[10px] text-blue-600">Please hold your position in front of the camera.</p>
                     </div>
                   </div>
                 )}
-              </>
+              </div>
+            ) : (
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg text-center space-y-2">
+                <RefreshCw className="w-5 h-5 mx-auto text-blue-600 animate-spin" />
+                <p className="text-xs font-semibold text-slate-700">Identifying Face...</p>
+                <p className="text-[11px] text-slate-500">Matching 128D visual features against staff registry</p>
+              </div>
             )}
           </div>
 
@@ -1112,105 +1405,68 @@ export const AttendancePage: React.FC = () => {
               </div>
             </div>
 
-            {/* GPS Simulation Sandbox */}
-            <div className="pt-2 border-t border-slate-200">
-              <label className="block text-[11px] font-semibold text-slate-600 mb-1.5 flex items-center gap-1">
-                <Sliders className="w-3 h-3 text-slate-500" />
-                <span>GPS Simulation Modes (For Verification Testing):</span>
-              </label>
-              <div className="grid grid-cols-3 gap-1.5 text-[10px]">
-                <button
-                  type="button"
-                  onClick={() => setSimulatedCoords('inside')}
-                  className="py-1 px-2 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium border border-slate-200 transition-colors"
-                >
-                  Inside Campus
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSimulatedCoords('outside')}
-                  className="py-1 px-2 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium border border-slate-200 transition-colors"
-                >
-                  Outside (68km)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSimulatedCoords('poor_accuracy')}
-                  className="py-1 px-2 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 font-medium border border-slate-200 transition-colors"
-                >
-                  Degraded (140m)
-                </button>
+            {/* Campus Presence Simulation Controls */}
+            <div className="pt-3 border-t border-slate-200 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-700 flex items-center gap-1">
+                  <Navigation className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Campus Location Mode:</span>
+                </span>
+                {isSimulatedGps ? (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold border border-emerald-300">
+                    Simulation Active
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+                    Real Device GPS
+                  </span>
+                )}
               </div>
-              {isSimulatedGps && (
-                <button
-                  onClick={fetchRealGps}
-                  className="w-full mt-1.5 text-[10px] text-blue-700 hover:underline text-center"
-                >
-                  Reset to real device GPS
-                </button>
-              )}
-            </div>
 
-            {/* Anti-Spoofing & Replay Attack Testing Sandbox */}
-            <div className="pt-2.5 mt-2 border-t border-slate-200">
-              <label className="block text-[11px] font-semibold text-slate-600 mb-1.5 flex items-center gap-1">
-                <ShieldCheck className="w-3 h-3 text-slate-500" />
-                <span>Anti-Spoofing Test Modes (Phone / Photo Detection):</span>
-              </label>
-              <div className="grid grid-cols-4 gap-1 text-[10px]">
-                <button
-                  type="button"
-                  onClick={() => setSpoofTestMode('AUTO')}
-                  className={`py-1 px-1 rounded font-medium border text-center transition-colors ${
-                    spoofTestMode === 'AUTO'
-                      ? 'bg-blue-600 text-white border-blue-600 font-semibold'
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-200'
-                  }`}
-                >
-                  Auto CV
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSpoofTestMode('FORCE_PHONE')}
-                  className={`py-1 px-1 rounded font-medium border text-center transition-colors ${
-                    spoofTestMode === 'FORCE_PHONE'
-                      ? 'bg-rose-600 text-white border-rose-600 font-semibold'
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-200'
-                  }`}
-                >
-                  Test Phone
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSpoofTestMode('FORCE_PHOTO')}
-                  className={`py-1 px-1 rounded font-medium border text-center transition-colors ${
-                    spoofTestMode === 'FORCE_PHOTO'
-                      ? 'bg-rose-600 text-white border-rose-600 font-semibold'
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-200'
-                  }`}
-                >
-                  Test Photo
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSpoofTestMode('FORCE_LIVE')}
-                  className={`py-1 px-1 rounded font-medium border text-center transition-colors ${
-                    spoofTestMode === 'FORCE_LIVE'
-                      ? 'bg-emerald-600 text-white border-emerald-600 font-semibold'
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-200'
-                  }`}
-                >
-                  Test Live
-                </button>
-              </div>
-              <p className="text-[10px] text-slate-500 mt-1">
-                {spoofTestMode === 'AUTO'
-                  ? 'Active: Real-time computer vision frame analysis & screen reflection detection.'
-                  : spoofTestMode === 'FORCE_PHONE'
-                  ? 'Simulating: Digital screen / phone replay spoof attack (warning badge & check-in blocked).'
-                  : spoofTestMode === 'FORCE_PHOTO'
-                  ? 'Simulating: Static photograph presentation attack (zero micro-motion rejection).'
-                  : 'Simulating: Verified genuine live human face ready for biometric check-in.'}
+              {isSimulatedGps ? (
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSimulatedCoords('inside')}
+                    className="flex-1 py-1.5 px-2.5 rounded bg-emerald-600 text-white text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 cursor-default"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Inside Campus (Active)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={fetchRealGps}
+                    className="py-1.5 px-3 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium border border-slate-300 flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                    title="Switch back to real device GPS sensor"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Real GPS</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setSimulatedCoords('inside')}
+                    className="w-full py-2 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                    <span>Simulate Inside Campus (Allow Attendance)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={fetchRealGps}
+                    className="text-[10px] text-blue-700 hover:underline text-center mt-0.5 cursor-pointer"
+                  >
+                    Refresh device GPS sensor fix
+                  </button>
+                </div>
+              )}
+
+              <p className="text-[10px] text-slate-500 leading-tight">
+                {isSimulatedGps
+                  ? 'Currently simulating coordinates inside campus perimeter (16.887333, 78.443028). Face recognition attendance is allowed.'
+                  : 'Click "Simulate Inside Campus" above to test or mark attendance without physical device presence on campus.'}
               </p>
             </div>
           </div>

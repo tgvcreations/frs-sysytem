@@ -63,7 +63,7 @@ const AppContent: React.FC = () => {
           {currentTab === 'dashboard' && <DashboardPage onNavigate={(tab) => setCurrentTab(tab)} />}
           {currentTab === 'attendance' && <AttendancePage />}
           {currentTab === 'staff' && <StaffPage />}
-          {currentTab === 'enrollment' && <FaceEnrollmentPage />}
+          {currentTab === 'enrollment' && <FaceEnrollmentPage onNavigate={(tab) => setCurrentTab(tab)} />}
           {currentTab === 'geofence' && <GeofencePage />}
           {currentTab === 'leaves' && <LeavePage />}
           {currentTab === 'shifts' && <ShiftsPage />}

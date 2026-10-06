@@ -370,15 +370,29 @@ export function initLocalStorage(): void {
     setItem(STORAGE_KEYS.SETTINGS, INITIAL_SETTINGS);
   }
 
-  const existingAtt = getItem<AttendanceRecord[]>(STORAGE_KEYS.ATTENDANCE, []);
+  // Self-heal attendance: purge any fake mock records for today so today starts clean
+  const today = new Date().toISOString().split('T')[0];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  let existingAtt = getItem<AttendanceRecord[]>(STORAGE_KEYS.ATTENDANCE, []);
+  
+  // Remove any legacy fake initial records that were set to today's date
+  if (existingAtt && existingAtt.length > 0) {
+    const cleanedAtt = existingAtt.filter(
+      (a) => !(a.date === today && (a.id === 'att_01' || a.id === 'att_02'))
+    );
+    if (cleanedAtt.length !== existingAtt.length) {
+      existingAtt = cleanedAtt;
+      setItem(STORAGE_KEYS.ATTENDANCE, existingAtt);
+    }
+  }
+
   if (!existingAtt || existingAtt.length === 0) {
-    // Generate standard attendance records
-    const today = new Date().toISOString().split('T')[0];
+    // Generate standard historical attendance records strictly for yesterday (NOT today)
     const initialAttendance: AttendanceRecord[] = [
       {
         id: 'att_01',
         staff_id: 'staff_001',
-        date: today,
+        date: yesterday,
         check_in_time: '08:45',
         check_out_time: '16:30',
         check_in_latitude: 16.887333,
@@ -389,15 +403,15 @@ export function initLocalStorage(): void {
         verification_method: 'FRS_GPS',
         face_match_confidence: 98.6,
         working_hours: 7.75,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        created_at: new Date(Date.now() - 86400000).toISOString(),
+        updated_at: new Date(Date.now() - 86400000).toISOString(),
       },
       {
         id: 'att_02',
         staff_id: 'staff_002',
-        date: today,
+        date: yesterday,
         check_in_time: '08:28',
-        check_out_time: null,
+        check_out_time: '15:35',
         check_in_latitude: 16.887333,
         check_in_longitude: 78.443028,
         check_in_accuracy: 10,
@@ -405,12 +419,37 @@ export function initLocalStorage(): void {
         status: 'Present',
         verification_method: 'FRS_GPS',
         face_match_confidence: 99.1,
-        working_hours: 0,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        working_hours: 7.1,
+        created_at: new Date(Date.now() - 86400000).toISOString(),
+        updated_at: new Date(Date.now() - 86400000).toISOString(),
       },
     ];
     setItem(STORAGE_KEYS.ATTENDANCE, initialAttendance);
+  }
+
+  // Initialize initial biometric templates for enrolled staff
+  const existingBiometrics = getItem<any>(STORAGE_KEYS.BIOMETRICS, {});
+  let biometricsChanged = false;
+  for (const st of INITIAL_STAFF) {
+    if (st.face_enrollment_status === 'Enrolled' && !existingBiometrics[st.id]) {
+      const seed = parseInt(st.staff_id.replace(/\D/g, '')) || 1;
+      const desc: number[] = [];
+      for (let i = 0; i < 128; i++) {
+        desc.push(Math.round(Math.sin((i + 1) * seed) * 0.1 * 10000) / 10000);
+      }
+      const norm = Math.sqrt(desc.reduce((sum, v) => sum + v * v, 0)) || 1;
+      existingBiometrics[st.id] = {
+        face_descriptor: desc.map((v) => Math.round((v / norm) * 10000) / 10000),
+        profile_photo: st.profile_photo_url,
+        sample_count: 3,
+        enrolled_at: new Date().toISOString(),
+        enrolled_by: 'System Initial Seed',
+      };
+      biometricsChanged = true;
+    }
+  }
+  if (biometricsChanged) {
+    setItem(STORAGE_KEYS.BIOMETRICS, existingBiometrics);
   }
 
   const existingLeaves = getItem<LeaveRequest[]>(STORAGE_KEYS.LEAVES, []);
@@ -819,6 +858,73 @@ export async function handleLocalApi(endpoint: string, options: RequestInit = {}
     delete biometrics[staffId];
     setItem(STORAGE_KEYS.BIOMETRICS, biometrics);
     return { message: 'Biometric enrollment disabled.' };
+  }
+
+  // Get all enrolled biometric descriptors for 1:N real-time matching
+  if (pathname === '/biometrics/all' && method === 'GET') {
+    const biometrics = getItem<any>(STORAGE_KEYS.BIOMETRICS, {});
+    const staff = getItem<Staff[]>(STORAGE_KEYS.STAFF, INITIAL_STAFF);
+    const templates = Object.entries(biometrics).map(([sId, data]: [string, any]) => {
+      const matched = staff.find((s) => s.id === sId || s.staff_id === sId);
+      return {
+        staff_id: sId,
+        staff: matched,
+        face_descriptor: data.face_descriptor,
+        profile_photo: data.profile_photo || matched?.profile_photo_url,
+      };
+    });
+    return { templates };
+  }
+
+  // 1:N Face Identification against enrolled staff registry
+  if (pathname === '/attendance/identify' && method === 'POST') {
+    const { face_descriptor } = body;
+    if (!face_descriptor || !Array.isArray(face_descriptor)) {
+      return { matched: false, message: 'Invalid face descriptor' };
+    }
+    const biometrics = getItem<any>(STORAGE_KEYS.BIOMETRICS, {});
+    const staff = getItem<Staff[]>(STORAGE_KEYS.STAFF, INITIAL_STAFF);
+
+    let bestMatch: any = null;
+    let minDistance = 999;
+
+    for (const [sId, data] of Object.entries<any>(biometrics)) {
+      if (!data.face_descriptor || !Array.isArray(data.face_descriptor)) continue;
+      const enrolled = data.face_descriptor;
+      let sum = 0;
+      for (let i = 0; i < Math.min(face_descriptor.length, enrolled.length); i++) {
+        const d = face_descriptor[i] - enrolled[i];
+        sum += d * d;
+      }
+      const dist = Math.sqrt(sum);
+      if (dist < minDistance) {
+        minDistance = dist;
+        const matchedStaff = staff.find((s) => s.id === sId || s.staff_id === sId);
+        if (matchedStaff && matchedStaff.employment_status === 'Active') {
+          bestMatch = {
+            staff: matchedStaff,
+            distance: Math.round(dist * 1000) / 1000,
+            confidence: Math.round(Math.max(0, Math.min(100, (1 - dist / (0.70 * 1.25)) * 100)) * 10) / 10,
+          };
+        }
+      }
+    }
+
+    if (bestMatch && minDistance <= 0.72) {
+      return {
+        matched: true,
+        staff: bestMatch.staff,
+        distance: bestMatch.distance,
+        confidence: bestMatch.confidence,
+        message: `Identified ${bestMatch.staff.full_name}`,
+      };
+    }
+
+    return {
+      matched: false,
+      message: 'Face not recognized in staff registry.',
+      minDistance: Math.round(minDistance * 1000) / 1000,
+    };
   }
 
   // 5. ATTENDANCE & VERIFICATION PIPELINE

@@ -1,4 +1,4 @@
-# VUPPALA CHARITABLE PRATHAMIKA PATASHALA KALASHALA – STAFF FRS & ATTENDANCE SYSTEM
+#  STAFF FRS & ATTENDANCE SYSTEM
 
 A complete, production-ready full-stack web application for Facial Recognition System (FRS) and Geofenced Attendance Management, built specifically for **VUPPALA CHARITABLE PRATHAMIKA PATASHALA KALASHALA**.
 
